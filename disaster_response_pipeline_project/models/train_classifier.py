@@ -1,100 +1,146 @@
 import sys
-import pandas as pd
 import numpy as np
-import sqlite3
+import pandas as pd
 from sqlalchemy import create_engine
+import nltk
+from nltk.tokenize import word_tokenize
+from nltk.stem import WordNetLemmatizer
+from nltk.corpus import stopwords
+import re
+from sklearn.pipeline import Pipeline
+from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer
+from sklearn.ensemble import AdaBoostClassifier
+from sklearn.multioutput import MultiOutputClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report
+from sklearn.model_selection import GridSearchCV
+import pickle
 
-def load_data(messages_filepath, categories_filepath):
-    """
-      Function:
-      load data from two csv file and then merge them
-      Args:
-      messages_filepath (str): the file path of messages csv file
-      categories_filepath (str): the file path of categories csv file
-      Return:
-      df (DataFrame): A dataframe of messages and categories
-      """
-    messages = pd.read_csv(messages_filepath)
-    categories = pd.read_csv(categories_filepath)
-    df = messages.merge(categories, how='inner', on='id')
-    return df
+nltk.download(['wordnet', 'punkt', 'stopwords'])
 
-
-def clean_data(df):
-    """
-      Function:
-      clean the Dataframe df
-      Args:
-      df (DataFrame): A dataframe of messages and categories need to be cleaned
-      Return:
-      df (DataFrame): A cleaned dataframe of messages and categories
-      """
-
-    # Split `categories` into separate category columns.
-    categories = df['categories'].str.split(';', expand=True)
-
-    # Cut the last character of each category
-    # select the first row of the categories dataframe
-    row = categories.head(1)
-    category_colnames = row.applymap(lambda x: x[:-2]).iloc[0, :]
-    category_colnames = category_colnames.tolist()
-
-    # Rename the columns of `categories`
-    categories.columns = category_colnames
-
-    # Convert category values to just numbers 0 or 1.
-    for column in categories:
-        categories[column] = categories[column].astype(str).str[-1]
-        categories[column] = categories[column].astype(int)
-
-    # drop the original categories column from `df`
-    df = df.drop(['categories'], axis=1)
-
-    # concatenate the original dataframe with the new `categories` dataframe
-    df = pd.concat([df, categories], axis=1, join='inner')
-
-    # Drop the duplicates.
-    df.drop_duplicates(inplace=True)
-
-    return df
-
-
-def save_data(df, database_filename):
+def load_data(database_filepath):
     """
        Function:
-       Save the Dataframe df in a database
+       load data from database
        Args:
-       df (DataFrame): A dataframe of messages and categories
-       database_filename (str): The file name of the database
+       database_filepath: the path of the database
+       Return:
+       X (DataFrame) : Message features dataframe
+       Y (DataFrame) : target dataframe
+       category (list of str) : target labels list
        """
-    engine = create_engine('sqlite:///{}'.format(database_filename))
-    df.to_sql('disaster_messages_tbl', engine, index=False)
+    engine = create_engine('sqlite:///{}'.format(database_filepath))
+    df = pd.read_sql_table('disaster_messages_tbl', engine)
+    X = df['message']  # Message Column
+    Y = df.iloc[:, 4:]  # Classification label
+    return X, Y
+
+
+def tokenize(text):
+    """
+    Function: split text into words and return the root form of the words
+    Args:
+      text(str): the message
+    Return:
+      lemm(list of str): a list of the root form of the message words
+    """
+
+    # Normalize text
+    text = re.sub(r"[^a-zA-Z0-9]", " ", text.lower())
+
+    # Tokenize text
+    words = word_tokenize(text)
+
+    # Remove stop words
+    stop = stopwords.words("english")
+    words = [t for t in words if t not in stop]
+
+    # Lemmatization
+    lemm = [WordNetLemmatizer().lemmatize(w) for w in words]
+
+    return lemm
+
+
+def build_model():
+    """
+     Function: build a model for classifing the disaster messages
+     Return:
+       cv(list of str): classification model
+     """
+
+    # Create a pipeline
+    pipeline = Pipeline([
+        ('vect', CountVectorizer(tokenizer=tokenize)),
+        ('tfidf', TfidfTransformer()),
+        ('clf', MultiOutputClassifier(AdaBoostClassifier()))
+    ])
+    # Create Grid search parameters
+    parameters = {
+        'tfidf__use_idf': (True, False),
+        'clf__estimator__n_estimators': [50, 60, 70]
+    }
+
+    cv = GridSearchCV(pipeline, param_grid=parameters)
+
+    return cv
+
+
+def evaluate_model(model, X_test, Y_test):
+    """
+    Function: Evaluate the model and print the f1 score, precision and recall for each output category of the dataset.
+    Args:
+    model: the classification model
+    X_test: test messages
+    Y_test: test target
+    """
+    y_pred = model.predict(X_test)
+    i = 0
+    for col in Y_test:
+        print('Feature {}: {}'.format(i + 1, col))
+        print(classification_report(Y_test[col], y_pred[:, i]))
+        i = i + 1
+    accuracy = (y_pred == Y_test.values).mean()
+    print('The model accuracy is {:.3f}'.format(accuracy))
+
+
+def save_model(model, model_filepath):
+    """
+    Function: Save a pickle file of the model
+    Args:
+    model: the classification model
+    model_filepath (str): the path of pickle file
+    """
+
+    with open(model_filepath, 'wb') as f:
+        pickle.dump(model, f)
 
 
 def main():
-    if len(sys.argv) == 4:
-
-        messages_filepath, categories_filepath, database_filepath = sys.argv[1:]
-
-        print('Loading data...\n    MESSAGES: {}\n    CATEGORIES: {}'
-              .format(messages_filepath, categories_filepath))
-        df = load_data(messages_filepath, categories_filepath)
-
-        print('Cleaning data...')
-        df = clean_data(df)
+    if len(sys.argv) == 3:
+        database_filepath, model_filepath = sys.argv[1:]
+        print('Loading data...\n    DATABASE: {}'.format(database_filepath))
+        X, Y = load_data(database_filepath)
+        X_train, X_test, Y_train, Y_test = train_test_split(X, Y, test_size=0.2)
         
-        print('Saving data...\n    DATABASE: {}'.format(database_filepath))
-        save_data(df, database_filepath)
+        print('Building model...')
+        model = build_model()
         
-        print('Cleaned data saved to database!')
-    
+        print('Training model...')
+        model.fit(X_train, Y_train)
+        
+        print('Evaluating model...')
+        evaluate_model(model, X_test, Y_test)
+
+        print('Saving model...\n    MODEL: {}'.format(model_filepath))
+        save_model(model, model_filepath)
+
+        print('Trained model saved!')
+
     else:
-        print('Please provide the filepaths of the messages and categories '\
-              'datasets as the first and second argument respectively, as '\
-              'well as the filepath of the database to save the cleaned data '\
-              'to as the third argument. \n\nExample: python process_data.py '\
-              'disaster_messages.csv disaster_categories.csv '\
-              'DisasterResponse.db')
+        print('Please provide the filepath of the disaster messages database '\
+              'as the first argument and the filepath of the pickle file to '\
+              'save the model to as the second argument. \n\nExample: python '\
+              'train_classifier.py ../data/DisasterResponse.db classifier.pkl')
 
 
 if __name__ == '__main__':
