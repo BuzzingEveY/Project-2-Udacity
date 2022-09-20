@@ -15,7 +15,7 @@ plotly
 sqlite3
 The code should run using Python versions 3.*.
 
-Project Motivation
+<h2> Project Motivation
 The goal of the project is to classify the disaster messages into categories. In this project, I analyzed disaster data from Figure Eight to build a model for an API that classifies disaster messages. Through a web app, the user can input a new message and get classification results in several categories. The web app also display visualizations of the data.
 
 Project Descriptions
